@@ -7,8 +7,13 @@ from torchvision import datasets, transforms, models
 from torch.utils.data import DataLoader
 from sklearn.metrics import confusion_matrix, classification_report
 import numpy as np
+import time
+from datetime import datetime
 
 def main():
+    start_time = time.time()
+    start_datetime = datetime.now()
+
     print("=== [비전 검사] 원통 표면 스크래치 탐지 AI 초정밀 학습 시작 ===")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -34,6 +39,8 @@ def main():
     }
 
     BASE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data')
+    log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'training_log.txt')
+
     try:
         image_datasets = {x: datasets.ImageFolder(os.path.join(BASE_DIR, x), data_transforms[x]) for x in ['train', 'test']}
     except FileNotFoundError:
@@ -81,9 +88,24 @@ def main():
     
     best_acc = 0.0
     best_weights = copy.deepcopy(model.state_dict())
+    best_time = None
 
     for epoch in range(epochs):
+        epoch_start = time.time()
         current_lr = optimizer.param_groups[0]['lr']
+
+        elapsed_total = time.time() - start_time
+        avg_epoch_time = elapsed_total / (epoch + 1)
+        remaining_time = avg_epoch_time * (epochs - epoch - 1)
+
+        eta_hours = int(remaining_time // 3600)
+        eta_minutes = int((remaining_time % 3600) // 60)
+        eta_seconds = int(remaining_time % 60)
+
+        print(f"\n Epoch {epoch+1:02d} / {epochs} | LR: {current_lr:.6f}")
+        print(f" 예상 남은 시간: {eta_hours}시간 {eta_minutes}분 {eta_seconds}초")
+        print(f"{'─'*60}")
+
         print(f"\n Epoch {epoch+1:02d} / {epochs}  |  LR: {current_lr:.6f}")
         print(f"{'─'*50}")
 
@@ -118,8 +140,20 @@ def main():
             if phase == 'test' and epoch_acc > best_acc:
                 best_acc = epoch_acc
                 best_weights = copy.deepcopy(model.state_dict())
+                best_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+                with open(log_path, 'a', encoding='utf-8') as f:
+                    f.write(f"[BEST] Epoch {epoch+1} | Acc={epoch_acc:.4f} | Time={best_time}\n")
 
         scheduler.step()
+
+        epoch_end = time.time()
+        epoch_elapsed = int(epoch_end - epoch_start)
+
+        ep_min = epoch_elapsed // 60
+        ep_sec = epoch_elapsed % 60
+
+        print(f" Epoch 소요 시간: {ep_min}분 {ep_sec}초")
 
     SAVE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'scratch_resnet18_best.pth')
     torch.save(best_weights, SAVE_PATH)
@@ -144,6 +178,31 @@ def main():
     print(f"  실제: scratch  {cm[1][0]:5d}       {cm[1][1]:5d}")
     print("\n 상세 성능 리포트:")
     print(classification_report(all_labels, all_preds, target_names=class_names, digits=4))
+
+    end_time = time.time()
+    end_datetime = datetime.now()
+
+    total_elapsed = int(end_time - start_time)
+
+    total_hours = total_elapsed // 3600
+    total_minutes = (total_elapsed % 3600) // 60
+    total_seconds = total_elapsed % 60
+
+    print("\n" + "="*70)
+    print(f" 학습 시작 시간 : {start_datetime.strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f" 학습 종료 시간 : {end_datetime.strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f" 총 소요 시간  : {total_hours}시간 {total_minutes}분 {total_seconds}초")
+    print(f" 최고 성능 갱신 시각 : {best_time}")
+    print("="*70)
+
+    with open(log_path, 'a', encoding='utf-8') as f:
+        f.write("\n")
+        f.write("="*70 + "\n")
+        f.write(f"Training Start : {start_datetime.strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write(f"Training End   : {end_datetime.strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write(f"Total Time     : {total_hours}h {total_minutes}m {total_seconds}s\n")
+        f.write(f"Best Accuracy  : {best_acc:.4f}\n")
+        f.write("="*70 + "\n")
 
 if __name__ == '__main__':
     main()
