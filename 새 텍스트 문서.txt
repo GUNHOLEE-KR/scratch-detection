@@ -1,0 +1,215 @@
+import os
+import copy
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torchvision import datasets, transforms, models
+from torch.utils.data import DataLoader
+from sklearn.metrics import confusion_matrix, classification_report
+import numpy as np
+
+def main():
+    print("=== [비전 검사] 원통 표면 스크래치 탐지 AI 학습 시작 ===")
+
+    # ─────────────────────────────────────────────────────────────
+    # 1. 하드웨어 장치 설정 (GPU 우선)
+    # ─────────────────────────────────────────────────────────────
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f" 현재 사용 중인 하드웨어 장치: {device}")
+
+    # ─────────────────────────────────────────────────────────────
+    # 2. 이미지 전처리 파이프라인 정의
+    # ─────────────────────────────────────────────────────────────
+    data_transforms = {
+        'train': transforms.Compose([
+            transforms.Resize((224, 224)),
+            transforms.RandomHorizontalFlip(),
+            transforms.RandomVerticalFlip(),
+            transforms.RandomRotation(15),          # 원통 회전 각도 변화 대비
+            transforms.ColorJitter(brightness=0.3, contrast=0.4, saturation=0.2),
+            transforms.RandomGrayscale(p=0.1),      # 흑백 노이즈 대비 강건성 향상
+            transforms.ToTensor(),
+            transforms.Normalize([0.485, 0.456, 0.406],
+                                 [0.229, 0.224, 0.225])
+        ]),
+        'test': transforms.Compose([
+            transforms.Resize((224, 224)),
+            transforms.ToTensor(),
+            transforms.Normalize([0.485, 0.456, 0.406],
+                                 [0.229, 0.224, 0.225])
+        ]),
+    }
+
+    # ─────────────────────────────────────────────────────────────
+    # 3. 데이터셋 로드
+    # 폴더 구조 예시:
+    #   data/train/good/    ← 양품 이미지
+    #   data/train/scratch/ ← 불량 이미지
+    #   data/test/good/
+    #   data/test/scratch/
+    # ─────────────────────────────────────────────────────────────
+    BASE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data')
+
+    try:
+        image_datasets = {
+            x: datasets.ImageFolder(os.path.join(BASE_DIR, x), data_transforms[x])
+            for x in ['train', 'test']
+        }
+    except FileNotFoundError:
+        print("\n[오류] 데이터 폴더를 찾을 수 없습니다.")
+        print("  data/train/good/, data/train/scratch/")
+        print("  data/test/good/,  data/test/scratch/")
+        print("위 폴더를 만들고 이미지를 넣어주세요.")
+        return
+
+    dataloaders = {
+        x: DataLoader(image_datasets[x], batch_size=8, shuffle=(x == 'train'),
+                      num_workers=0, pin_memory=(device.type == 'cuda'))
+        for x in ['train', 'test']
+    }
+
+    dataset_sizes = {x: len(image_datasets[x]) for x in ['train', 'test']}
+    class_names   = image_datasets['train'].classes  # ['good', 'scratch'] 알파벳 순
+
+    print(f" 판독 클래스  : {class_names}")
+    print(f" 학습 이미지  : {dataset_sizes['train']}장")
+    print(f" 평가 이미지  : {dataset_sizes['test']}장")
+
+    # ─────────────────────────────────────────────────────────────
+    # 4. 클래스 불균형 보정 (양품 >> 불량인 경우가 대부분)
+    #    scratch 샘플이 적어도 손실 함수가 공평하게 학습하도록 가중치 부여
+    # ─────────────────────────────────────────────────────────────
+    train_targets = image_datasets['train'].targets          # [0,0,0,...,1,1,...] 레이블 목록
+    class_counts  = np.bincount(train_targets)               # [good 수, scratch 수]
+    class_weights = 1.0 / class_counts                       # 역비례 가중치
+    class_weights = class_weights / class_weights.sum()      # 합이 1이 되도록 정규화
+    class_weights_tensor = torch.tensor(class_weights, dtype=torch.float).to(device)
+
+    print(f"\n 클래스 샘플 수  : good={class_counts[0]}장, scratch={class_counts[1]}장")
+    print(f" 손실 가중치     : good={class_weights[0]:.4f}, scratch={class_weights[1]:.4f}")
+
+    # ─────────────────────────────────────────────────────────────
+    # 5. 모델 정의 (ResNet18 전이학습)
+    # ─────────────────────────────────────────────────────────────
+    model = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
+
+    # 초반 레이어 동결: 사전학습 특징 보존, 학습 속도 향상
+    for name, param in model.named_parameters():
+        if 'layer4' not in name and 'fc' not in name:
+            param.requires_grad = False
+
+    # 출력 레이어를 2클래스(good / scratch)로 교체
+    num_features = model.fc.in_features
+    model.fc = nn.Sequential(
+        nn.Dropout(p=0.3),          # 과적합 방지 드롭아웃
+        nn.Linear(num_features, 2)
+    )
+    model = model.to(device)
+
+    # ─────────────────────────────────────────────────────────────
+    # 6. 손실함수 / 옵티마이저 / 학습률 스케줄러
+    # ─────────────────────────────────────────────────────────────
+    criterion = nn.CrossEntropyLoss(weight=class_weights_tensor)  # 클래스 가중치 적용
+
+    # 동결하지 않은 파라미터만 학습
+    optimizer = optim.Adam(
+        filter(lambda p: p.requires_grad, model.parameters()),
+        lr=0.0001
+    )
+
+    # 5 에폭마다 학습률을 0.5배로 감소 → 후반부 세밀한 조정
+    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.5)
+
+    # ─────────────────────────────────────────────────────────────
+    # 7. 학습 루프
+    # ─────────────────────────────────────────────────────────────
+    epochs = 15                      # 전이학습은 15~20 에폭이 안정적
+    best_acc      = 0.0
+    best_weights  = copy.deepcopy(model.state_dict())  # 최고 성능 가중치 백업용
+
+    for epoch in range(epochs):
+        print(f"\n{'─'*50}")
+        print(f" Epoch {epoch+1:02d} / {epochs}  |  LR: {scheduler.get_last_lr()[0]:.6f}")
+        print(f"{'─'*50}")
+
+        for phase in ['train', 'test']:
+            model.train() if phase == 'train' else model.eval()
+
+            running_loss     = 0.0
+            running_corrects = 0
+
+            for inputs, labels in dataloaders[phase]:
+                inputs = inputs.to(device)
+                labels = labels.to(device)
+
+                optimizer.zero_grad()
+
+                with torch.set_grad_enabled(phase == 'train'):
+                    outputs = model(inputs)
+                    _, preds = torch.max(outputs, 1)
+                    loss = criterion(outputs, labels)
+
+                    if phase == 'train':
+                        loss.backward()
+                        optimizer.step()
+
+                running_loss     += loss.item() * inputs.size(0)
+                running_corrects += torch.sum(preds == labels.data)
+
+            epoch_loss = running_loss / dataset_sizes[phase]
+            epoch_acc  = running_corrects.double() / dataset_sizes[phase]
+
+            tag = "★ BEST" if (phase == 'test' and epoch_acc > best_acc) else ""
+            print(f" [{phase.upper():5s}]  Loss: {epoch_loss:.4f}  |  Acc: {epoch_acc:.4f}  {tag}")
+
+            # 검증 정확도가 갱신되면 가중치 저장
+            if phase == 'test' and epoch_acc > best_acc:
+                best_acc     = epoch_acc
+                best_weights = copy.deepcopy(model.state_dict())
+
+        scheduler.step()
+
+    # ─────────────────────────────────────────────────────────────
+    # 8. 최고 성능 가중치 저장
+    # ─────────────────────────────────────────────────────────────
+    SAVE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'scratch_resnet18_best.pth')
+    torch.save(best_weights, SAVE_PATH)
+    print(f"\n 모델 저장 완료 → {SAVE_PATH}")
+
+    print(f"\n 최고 검증 정확도: {best_acc:.4f}")
+    print(" 모델 저장 완료 → scratch_resnet18_best.pth")
+
+    # ─────────────────────────────────────────────────────────────
+    # 9. 혼동행렬 & 상세 성능 리포트 출력
+    #    정밀도(Precision), 재현율(Recall), F1-Score 확인
+    # ─────────────────────────────────────────────────────────────
+    print("\n=== 최종 성능 평가 (Best 모델 기준) ===")
+    model.load_state_dict(best_weights)
+    model.eval()
+
+    all_preds  = []
+    all_labels = []
+
+    with torch.no_grad():
+        for inputs, labels in dataloaders['test']:
+            inputs = inputs.to(device)
+            outputs = model(inputs)
+            _, preds = torch.max(outputs, 1)
+            all_preds.extend(preds.cpu().numpy())
+            all_labels.extend(labels.numpy())
+
+    cm = confusion_matrix(all_labels, all_preds)
+    print("\n 혼동행렬 (Confusion Matrix):")
+    print(f"              예측: good  예측: scratch")
+    print(f"  실제: good     {cm[0][0]:5d}       {cm[0][1]:5d}")
+    print(f"  실제: scratch  {cm[1][0]:5d}       {cm[1][1]:5d}")
+
+    print("\n 상세 성능 리포트:")
+    print(classification_report(all_labels, all_preds,
+                                target_names=class_names, digits=4))
+
+    print("=== 학습 완료 ===")
+
+
+if __name__ == '__main__':
+    main()

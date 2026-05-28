@@ -1,0 +1,13 @@
+venv/
+__pycache__/
+*.pyc
+
+# 학습 결과물
+*.pth
+*.pt
+
+# vscode
+.vscode/
+
+# 필요하면 데이터 제외
+data/
