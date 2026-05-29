@@ -48,7 +48,7 @@ def main():
         return
 
     dataloaders = {
-        x: DataLoader(image_datasets[x], batch_size=8, shuffle=(x == 'train'), num_workers=0)
+        x: DataLoader(image_datasets[x], batch_size=32, shuffle=(x == 'train'), num_workers=6, pin_memory=True)
         for x in ['train', 'test']
     }
 

@@ -5,9 +5,11 @@ __pycache__/
 # 학습 결과물
 *.pth
 *.pt
+training_log.txt
 
 # vscode
 .vscode/
+.venv/
 
 # 필요하면 데이터 제외
 data/
