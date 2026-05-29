@@ -5,6 +5,7 @@ __pycache__/
 # 학습 결과물
 *.pth
 *.pt
+training_log.txt
 
 # vscode
 .vscode/
