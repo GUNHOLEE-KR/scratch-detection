@@ -65,6 +65,8 @@ def load_model():
 
 def main():
     print("=== CAM 시각화 지원 ONNX 모델 변환 시작 ===")
+    import sys
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     model, device = load_model()
     
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -77,14 +79,15 @@ def main():
         model,
         dummy_input,
         ONNX_PATH,
-        export_params=True,        
-        opset_version=18,          
-        do_constant_folding=True,  
-        input_names=['input'],     
-        output_names=['output', 'cam'], # C#에서 읽을 두 개의 출력 지정
-        dynamic_axes={'input': {0: 'batch_size'}, 'output': {0: 'batch_size'}, 'cam': {0: 'batch_size'}} 
+        export_params=True,
+        opset_version=17,
+        do_constant_folding=True,
+        input_names=['input'],
+        output_names=['output', 'cam'],
+        dynamic_axes={'input': {0: 'batch_size'}, 'output': {0: 'batch_size'}, 'cam': {0: 'batch_size'}},
+        dynamo=False,
     )
-    print(f" 변환 완료! ONNX 파일 생성됨 ➔ {ONNX_PATH}")
+    print(f" 변환 완료! ONNX 파일 생성됨: {ONNX_PATH}")
 
 if __name__ == '__main__':
     main()
